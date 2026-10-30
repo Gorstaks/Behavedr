@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.croatiasecurity.behavedr</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/behavedr/Behavedr</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/opt/behavedr</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>ThrottleInterval</key>
+    <integer>1</integer>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/opt/behavedr/logs/behavedr-stdout.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/opt/behavedr/logs/behavedr-stderr.log</string>
+
+    <key>HardResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>8192</integer>
+    </dict>
+
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>DOTNET_ENVIRONMENT</key>
+        <string>Production</string>
+    </dict>
+
+    <!-- v0.2.3 hardening -->
+    <key>SessionCreate</key>
+    <true/>
+
+    <key>Umask</key>
+    <integer>77</integer>
+
+    <key>ExitTimeOut</key>
+    <integer>5</integer>
+
+    <!-- Prefer CPU for detection loops -->
+    <key>Nice</key>
+    <integer>-10</integer>
+
+    <key>LowPriorityBackgroundIO</key>
+    <false/>
+
+    <key>EnablePressuredExit</key>
+    <false/>
+
+    <!-- Survive user logout when installed as system daemon -->
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+        <key>Crashed</key>
+        <true/>
+    </dict>
+
+    <key>MachServices</key>
+    <dict>
+        <key>com.croatiasecurity.behavedr</key>
+        <true/>
+    </dict>
+
+    <!-- Require Full Disk Access for deep monitoring (document for operators) -->
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>com.croatiasecurity.behavedr</string>
+    </array>
+</dict>
+</plist>

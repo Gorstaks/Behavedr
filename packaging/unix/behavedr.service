@@ -1,0 +1,76 @@
+[Unit]
+Description=Behavedr Behavioral EDR Agent
+Documentation=https://github.com/CroatiaSecurity/Behavedr
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+ExecStart=/opt/behavedr/Behavedr
+WorkingDirectory=/opt/behavedr
+Restart=always
+RestartSec=1
+WatchdogSec=30
+KillMode=process
+TimeoutStopSec=10
+
+# Run as dedicated service user (grant capabilities below instead of full root
+# when your policy allows; some monitors still need elevated caps).
+User=behavedr
+Group=behavedr
+
+# Capabilities for userland EDR + eBPF (v0.2.7):
+#   CAP_SYS_PTRACE     - inspect foreign process memory/maps
+#   CAP_DAC_READ_SEARCH- read audit/auth logs and restricted paths
+#   CAP_NET_ADMIN      - cn_proc netlink + nftables isolation
+#   CAP_AUDIT_READ     - audit log where available
+#   CAP_BPF / PERFMON  - eBPF load/attach (Linux 5.8+ preferred over SYS_ADMIN)
+#   CAP_SYS_ADMIN      - fanotify FAN_OPEN_EXEC + legacy eBPF on older kernels
+#                        (SystemCallFilter below drops mount/reboot/swap/etc.)
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_AUDIT_READ CAP_BPF CAP_PERFMON CAP_SYS_ADMIN
+AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_AUDIT_READ CAP_BPF CAP_PERFMON CAP_SYS_ADMIN
+
+# --- Hardening (v0.3.4: eBPF-compatible) ---
+NoNewPrivileges=true
+ProtectSystem=strict
+# bpffs pins live under /sys/fs/bpf/behavedr (LinuxEbpfLoader)
+ReadWritePaths=/opt/behavedr/logs /opt/behavedr/quarantine /var/lib/behavedr /opt/behavedr/buffer /opt/behavedr/run /sys/fs/bpf/behavedr
+# Create pin parent if missing (ExecStartPre would also work)
+# + = run as root so bpffs pin dir exists before dropping to service user
+ExecStartPre=+/bin/mkdir -p /sys/fs/bpf/behavedr
+ProtectHome=true
+PrivateTmp=true
+# Must be false for bpf map pin under /sys/fs/bpf (bpffs is a kernel tunable mount)
+ProtectKernelTunables=false
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+PrivateUsers=false
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=true
+SystemCallArchitectures=native
+MemoryDenyWriteExecute=false
+PrivateDevices=false
+UMask=0077
+# Drop entire dangerous syscall groups (seccomp via systemd)
+SystemCallFilter=~@mount @reboot @swap @obsolete @cpu-emulation @raw-io @debug
+# bpf filesystem type required for pinmaps; sysfs still needed for /sys
+RestrictFileSystems=ext4 btrfs xfs tmpfs proc sysfs bpf
+
+# Production network lockdown - set server IP then uncomment:
+# IPAddressDeny=any
+# IPAddressAllow=127.0.0.0/8 ::1/128
+# IPAddressAllow=<behavedr-server-ip>/32
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=behavedr
+
+[Install]
+WantedBy=multi-user.target

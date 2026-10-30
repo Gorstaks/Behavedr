@@ -1,0 +1,513 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.rid }})
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+    - name: Version from tag
+      id: ver
+      shell: bash
+      run: |
+        TAG="${GITHUB_REF_NAME}"
+        if [[ "$TAG" == v* ]]; then
+          VERSION="${TAG#v}"
+        else
+          VERSION=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -1)
+          TAG="v${VERSION}"
+        fi
+        echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
+      with:
+        dotnet-version: '10.0.x'
+        dotnet-quality: 'ga'
+
+    - name: Restore (locked)
+      run: |
+        dotnet restore src/Behavedr.Core/Behavedr.Core.csproj --locked-mode
+        dotnet restore src/Behavedr.Agent/Behavedr.Agent.csproj --locked-mode
+        dotnet restore tests/Behavedr.Tests/Behavedr.Tests.csproj --locked-mode
+
+    - name: Run tests
+      run: dotnet test tests/Behavedr.Tests/Behavedr.Tests.csproj -c Release --verbosity normal
+
+    - name: Publish Agent (single-file)
+      run: >
+        dotnet publish src/Behavedr.Agent/Behavedr.Agent.csproj
+        -c Release
+        -r ${{ matrix.rid }}
+        --self-contained
+        -p:PublishSingleFile=true
+        -p:IncludeAllContentForSelfExtract=true
+        -p:EnableCompressionInSingleFile=true
+        -p:DebugType=none
+        -p:DebugSymbols=false
+        -p:Version=${{ steps.ver.outputs.version }}
+        -o publish/agent-${{ matrix.rid }}
+
+    - name: Generate SBOM
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        dotnet tool install --global Microsoft.Sbom.DotNetTool 2>/dev/null || true
+        sbom-tool generate \
+          -b "publish/agent-${{ matrix.rid }}" \
+          -bc src/Behavedr.Agent \
+          -pn Behavedr \
+          -pv "${{ steps.ver.outputs.version }}" \
+          -ps CroatiaSecurity \
+          -nsb https://github.com/CroatiaSecurity/Behavedr || echo "SBOM generation skipped"
+
+    # --- Optional OS trust signing (secrets documented in docs/SUPPLY_CHAIN.md) ---
+    - name: Authenticode sign Windows binaries
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+        WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+      run: |
+        if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_BASE64)) {
+          Write-Warning "WINDOWS_CODESIGN_PFX_BASE64 not set - Windows artifacts will ship without Authenticode. See docs/SUPPLY_CHAIN.md."
+          exit 0
+        }
+        $pfxPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+        [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
+        $targets = @(
+          "publish/agent-win-x64/Behavedr.exe"
+        ) | Where-Object { Test-Path $_ }
+        foreach ($t in $targets) {
+          Write-Host "Authenticode signing $t"
+          & signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+            /f $pfxPath /p $env:WINDOWS_CODESIGN_PASSWORD $t
+          if ($LASTEXITCODE -ne 0) { throw "signtool failed for $t" }
+        }
+        Remove-Item $pfxPath -Force -ErrorAction SilentlyContinue
+
+    - name: codesign macOS binary (Developer ID)
+      if: runner.os == 'macOS'
+      shell: bash
+      env:
+        MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+        MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        MACOS_CODESIGN_IDENTITY: ${{ secrets.MACOS_CODESIGN_IDENTITY }}
+      run: |
+        set -euo pipefail
+        if [ -z "${MACOS_CERTIFICATE_P12_BASE64:-}" ]; then
+          echo "::warning::MACOS_CERTIFICATE_P12_BASE64 not set - macOS artifact will ship without codesign/notarization. See docs/SUPPLY_CHAIN.md."
+          exit 0
+        fi
+        CERT_PATH="${RUNNER_TEMP}/developer-id.p12"
+        echo "${MACOS_CERTIFICATE_P12_BASE64}" | base64 --decode > "${CERT_PATH}"
+        KEYCHAIN_PATH="${RUNNER_TEMP}/app-signing.keychain-db"
+        KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+        security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+        security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
+        security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
+        security import "${CERT_PATH}" -P "${MACOS_CERTIFICATE_PASSWORD}" -A -t cert -f pkcs12 -k "${KEYCHAIN_PATH}"
+        security list-keychain -d user -s "${KEYCHAIN_PATH}"
+        IDENTITY="${MACOS_CODESIGN_IDENTITY:-Developer ID Application}"
+        codesign --force --options runtime --timestamp --sign "${IDENTITY}" "publish/agent-osx-arm64/Behavedr"
+        codesign --verify --verbose=2 "publish/agent-osx-arm64/Behavedr"
+        rm -f "${CERT_PATH}"
+        # Notarization is a separate optional step when APPLE_ID secrets are configured (docs/SUPPLY_CHAIN.md).
+
+    - name: Stage portable package (Windows)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $rid = '${{ matrix.rid }}'
+        $ver = '${{ steps.ver.outputs.version }}'
+        $src = "publish/agent-$rid"
+        $stage = "dist/portable-$rid"
+        New-Item -ItemType Directory -Force -Path $stage | Out-Null
+        Copy-Item "$src/Behavedr.exe" $stage
+        if (Test-Path "$src/Assets") { Copy-Item "$src/Assets" $stage -Recurse -Force }
+        Copy-Item packaging/windows/README.txt $stage
+        Compress-Archive -Path "$stage/*" -DestinationPath "Behavedr-Portable-$ver-$rid.zip" -Force
+        Get-ChildItem $stage | Format-Table Name, Length
+
+    - name: Build Windows installer (Inno Setup)
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        choco install innosetup -y --no-progress --checksum-type sha256
+        $iscc = @(
+          "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+          "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+        ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+        if (-not $iscc) { throw "ISCC.exe not found after Inno Setup install" }
+        New-Item -ItemType Directory -Force -Path dist/windows | Out-Null
+        Copy-Item packaging/windows/README.txt publish/agent-win-x64/ -Force
+        if (Test-Path "Assets") {
+          New-Item -ItemType Directory -Force -Path "publish/agent-win-x64/Assets" | Out-Null
+          Copy-Item "Assets/*" "publish/agent-win-x64/Assets/" -Recurse -Force
+        }
+        if (Test-Path "src/Behavedr.Agent/appsettings.json") {
+          Copy-Item "src/Behavedr.Agent/appsettings.json" "publish/agent-win-x64/" -Force
+        }
+        $publish = (Resolve-Path "publish/agent-win-x64").Path
+        $outDir = Join-Path (Get-Location) "dist\windows"
+        New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+        & $iscc "packaging\windows\behavedr.iss" `
+          "/DMyAppVersion=${{ steps.ver.outputs.version }}" `
+          "/DPublishDir=$publish" `
+          "/DOutputDir=$outDir"
+        if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed: $LASTEXITCODE" }
+        Get-ChildItem dist/windows
+
+    - name: Authenticode sign Windows installer
+      if: runner.os == 'Windows'
+      shell: pwsh
+      env:
+        WINDOWS_CODESIGN_PFX_BASE64: ${{ secrets.WINDOWS_CODESIGN_PFX_BASE64 }}
+        WINDOWS_CODESIGN_PASSWORD: ${{ secrets.WINDOWS_CODESIGN_PASSWORD }}
+      run: |
+        if ([string]::IsNullOrWhiteSpace($env:WINDOWS_CODESIGN_PFX_BASE64)) {
+          Write-Warning "Skipping installer Authenticode (no PFX secret)"
+          exit 0
+        }
+        $pfxPath = Join-Path $env:RUNNER_TEMP "codesign-setup.pfx"
+        [IO.File]::WriteAllBytes($pfxPath, [Convert]::FromBase64String($env:WINDOWS_CODESIGN_PFX_BASE64))
+        $setup = Get-ChildItem "dist/windows/Behavedr-Setup-*.exe" | Select-Object -First 1
+        if (-not $setup) { throw "Setup exe not found for signing" }
+        & signtool sign /fd SHA256 /td SHA256 /tr http://timestamp.digicert.com `
+          /f $pfxPath /p $env:WINDOWS_CODESIGN_PASSWORD $setup.FullName
+        if ($LASTEXITCODE -ne 0) { throw "signtool failed for installer" }
+        Remove-Item $pfxPath -Force -ErrorAction SilentlyContinue
+
+    - name: Best-effort native depth artifacts
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set +e
+        chmod +x native/build-native.sh packaging/unix/build-deb.sh packaging/unix/build-rpm.sh 2>/dev/null
+        ./native/build-native.sh dist/native
+        # Copy any produced natives next to agent for packaging
+        if [ -d dist/native ]; then
+          cp -v dist/native/* publish/agent-${{ matrix.rid }}/ 2>/dev/null || true
+          mkdir -p dist/native-out
+          cp -v dist/native/* dist/native-out/ 2>/dev/null || true
+        fi
+        # Optional Linux packages (soft-fail)
+        if [ "${{ runner.os }}" = "Linux" ]; then
+          ./packaging/unix/build-deb.sh "${{ steps.ver.outputs.version }}" "publish/agent-${{ matrix.rid }}" "dist/native" \
+            && mv -v behavedr_*.deb dist/ 2>/dev/null || echo "deb build skipped/failed"
+          command -v rpmbuild >/dev/null && \
+            ./packaging/unix/build-rpm.sh "${{ steps.ver.outputs.version }}" "publish/agent-${{ matrix.rid }}" "dist/native" \
+            && mv -v *.rpm dist/ 2>/dev/null || echo "rpm build skipped/failed"
+        fi
+        exit 0
+
+    - name: Stage portable package (Unix)
+      if: runner.os != 'Windows'
+      shell: bash
+      run: |
+        set -e
+        RID="${{ matrix.rid }}"
+        VER="${{ steps.ver.outputs.version }}"
+        SRC="publish/agent-${RID}"
+        STAGE="dist/portable-${RID}"
+        mkdir -p "$STAGE"
+        cp "$SRC/Behavedr" "$STAGE/"
+        chmod +x "$STAGE/Behavedr"
+        [ -d "$SRC/Assets" ] && cp -r "$SRC/Assets" "$STAGE/" || true
+        cp packaging/unix/README.txt "$STAGE/"
+        # Bundle optional depth artifacts when present
+        for f in behavedr_exec.bpf.o libbehavedr_es.dylib pf-behavedr-block.conf; do
+          [ -f "$SRC/$f" ] && cp -v "$SRC/$f" "$STAGE/" || true
+          [ -f "packaging/unix/$f" ] && cp -v "packaging/unix/$f" "$STAGE/" || true
+          [ -f "dist/native/$f" ] && cp -v "dist/native/$f" "$STAGE/" || true
+        done
+        (cd "$STAGE" && zip -r "../../Behavedr-Portable-${VER}-${RID}.zip" .)
+        ls -la "$STAGE"
+
+    - name: Upload desktop artifacts
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: agent-${{ matrix.rid }}
+        path: |
+          Behavedr-Portable-*.zip
+          dist/windows/Behavedr-Setup-*.exe
+          dist/*.deb
+          dist/*.rpm
+          dist/native-out/*
+        if-no-files-found: error
+
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # Hard gate: product claims Android production status - release fails without APK.
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+    - name: Version from tag
+      id: ver
+      shell: bash
+      run: |
+        TAG="${GITHUB_REF_NAME}"
+        if [[ "$TAG" == v* ]]; then
+          VERSION="${TAG#v}"
+        else
+          VERSION=$(sed -n 's:.*<Version>\(.*\)</Version>.*:\1:p' Directory.Build.props | head -1)
+          TAG="v${VERSION}"
+        fi
+        echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
+      with:
+        dotnet-version: '10.0.x'
+        dotnet-quality: 'ga'
+
+    - name: Setup Java
+      uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00  # v4.7.1
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407  # v3.2.2
+
+    - name: Install Android platform packages
+      run: |
+        sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" 2>/dev/null \
+          || sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+        yes | sdkmanager --licenses || true
+
+    - name: Install MAUI Android workload
+      run: dotnet workload install maui-android
+
+    - name: Restore Mobile
+      run: |
+        if [ -f src/Behavedr.Mobile/packages.lock.json ]; then
+          dotnet restore src/Behavedr.Mobile/Behavedr.Mobile.csproj --locked-mode -p:MobileTfms=net10.0-android
+        else
+          echo "::warning::Mobile packages.lock.json missing - restore without locked-mode"
+          dotnet restore src/Behavedr.Mobile/Behavedr.Mobile.csproj -p:MobileTfms=net10.0-android
+        fi
+
+    - name: Publish Android
+      run: >
+        dotnet publish src/Behavedr.Mobile/Behavedr.Mobile.csproj
+        -c Release
+        -f net10.0-android
+        -r android-arm64
+        -p:Version=${{ steps.ver.outputs.version }}
+        -p:ApplicationDisplayVersion=${{ steps.ver.outputs.version }}
+        -o publish/android
+
+    # Signs with CroatiaSecurity release PKCS#12 when secrets are present.
+    # Secrets: ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD
+    # Optional: ANDROID_KEY_ALIAS (default: behavedr), ANDROID_KEY_PASSWORD (default: keystore password)
+    # Matches pin in AndroidCertPins / keys/android/behavedr-release.sha256.txt
+    - name: Release keystore signing (auto when secrets set)
+      env:
+        ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ]; then
+          echo "::warning::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD not set - APK keeps MSBuild debug/dev signature. See keys/android/README.md"
+          exit 0
+        fi
+        ALIAS="${ANDROID_KEY_ALIAS:-behavedr}"
+        KEYPASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+        KS="${RUNNER_TEMP}/behavedr-release.p12"
+        echo "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "$KS"
+        # Prefer unsigned artifact if MAUI produced one; else re-sign any APK
+        APK=$(find publish/android -type f -name '*-Signed.apk' | head -1 || true)
+        if [ -z "$APK" ]; then
+          APK=$(find publish/android -type f -name '*.apk' ! -name '*-unsigned.apk' | head -1 || true)
+        fi
+        if [ -z "$APK" ]; then
+          echo "::error::No APK found to sign"
+          exit 1
+        fi
+        echo "Signing $APK with alias=${ALIAS} (PKCS12)"
+        APKSIGNER=$(find "${ANDROID_HOME:-$HOME/Android/Sdk}" -name apksigner -type f 2>/dev/null | head -1 || true)
+        ZIPALIGN=$(find "${ANDROID_HOME:-$HOME/Android/Sdk}" -name zipalign -type f 2>/dev/null | head -1 || true)
+        if [ -z "$APKSIGNER" ]; then
+          echo "::error::apksigner not found in Android SDK"
+          exit 1
+        fi
+        ALIGNED="${RUNNER_TEMP}/behavedr-aligned.apk"
+        OUT="publish/android/Behavedr-release-signed.apk"
+        if [ -n "$ZIPALIGN" ]; then
+          "$ZIPALIGN" -f -p 4 "$APK" "$ALIGNED"
+          IN_APK="$ALIGNED"
+        else
+          IN_APK="$APK"
+        fi
+        # PKCS#12 from openssl (keys/android/behavedr-release.p12)
+        "$APKSIGNER" sign \
+          --v1-signing-enabled true \
+          --v2-signing-enabled true \
+          --v3-signing-enabled true \
+          --ks "$KS" \
+          --ks-type PKCS12 \
+          --ks-key-alias "$ALIAS" \
+          --ks-pass "pass:${ANDROID_KEYSTORE_PASSWORD}" \
+          --key-pass "pass:${KEYPASS}" \
+          --out "$OUT" \
+          "$IN_APK"
+        "$APKSIGNER" verify --verbose --print-certs "$OUT"
+        # Ensure release package step picks the signed APK
+        cp -v "$OUT" "publish/android/Behavedr-android-release.apk"
+        rm -f "$KS" "$ALIGNED"
+        echo "APK signed with release keystore (pin target: 7581EDDD52412F72786AA9B3274B5855801FF73293EC97DB2FBBCE8F5988B66F)"
+
+    - name: Package Android
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        VER="${{ steps.ver.outputs.version }}"
+        find publish/android -type f -name '*.apk' -print -exec cp -v {} dist/ \;
+        apk=$(find dist -name '*Signed.apk' -o -name '*.apk' | head -1)
+        if [ -z "$apk" ]; then
+          echo "::error::No APK produced - Android is a release hard-gate"
+          exit 1
+        fi
+        cp -v "$apk" "dist/Behavedr-${VER}-android.apk"
+        find dist -type f ! -name "Behavedr-${VER}-android.apk" -delete
+        test -f "dist/Behavedr-${VER}-android.apk"
+        ls -la dist
+
+    - name: Upload Android artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: android
+        path: dist/*
+        if-no-files-found: error
+
+  publish-release:
+    name: GitHub Release
+    needs: [desktop, android]
+    # Both desktop and Android must succeed for a production release.
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+    - name: Download all artifacts
+      uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093  # v4.3.0
+      with:
+        path: artifacts
+
+    - name: Flatten artifacts
+      run: |
+        set -euo pipefail
+        mkdir -p release-assets
+        find artifacts -type f \( -name '*.zip' -o -name '*.apk' -o -name '*.exe' \) -exec cp -v {} release-assets/ \;
+        ls -la release-assets
+        test -n "$(ls -A release-assets)"
+        ls release-assets/Behavedr-Setup-*-win-x64.exe
+        ls release-assets/Behavedr-Portable-*-win-x64.zip
+        ls release-assets/Behavedr-Portable-*-linux-x64.zip
+        ls release-assets/Behavedr-Portable-*-osx-arm64.zip
+        ls release-assets/Behavedr-*-android.apk
+
+    - name: Generate SHA256SUMS and RSA-PSS signatures
+      env:
+        UPDATE_SIGNING_KEY: ${{ secrets.UPDATE_SIGNING_KEY }}
+      run: |
+        set -euo pipefail
+        chmod +x tools/sign-release.sh
+        if [ -n "${UPDATE_SIGNING_KEY:-}" ]; then
+          printf '%s\n' "${UPDATE_SIGNING_KEY}" > "${RUNNER_TEMP}/update-signing-key.pem"
+          # Normalize possible Windows CRLF in secret
+          sed -i 's/\r$//' "${RUNNER_TEMP}/update-signing-key.pem"
+          ./tools/sign-release.sh release-assets "${RUNNER_TEMP}/update-signing-key.pem"
+          rm -f "${RUNNER_TEMP}/update-signing-key.pem"
+          # Hard requirement when key is configured: every binary asset must have .sig
+          for f in release-assets/*.{zip,exe,apk}; do
+            [ -e "$f" ] || continue
+            test -f "${f}.sig" || { echo "::error::Missing signature for $f"; exit 1; }
+          done
+          test -f release-assets/SHA256SUMS
+          test -f release-assets/SHA256SUMS.sig
+          echo "All release assets signed; SHA256SUMS published."
+        else
+          echo "::warning::UPDATE_SIGNING_KEY secret not configured - publishing SHA256SUMS only. Agents with production keys will REJECT unsigned updates."
+          (
+            cd release-assets
+            if command -v sha256sum >/dev/null 2>&1; then
+              sha256sum * > SHA256SUMS
+            else
+              for f in *; do
+                [ -f "$f" ] || continue
+                echo "$(shasum -a 256 "$f" | awk '{print $1}')  $f"
+              done > SHA256SUMS
+            fi
+          )
+        fi
+        echo "---- SHA256SUMS ----"
+        cat release-assets/SHA256SUMS
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@da05d552573ad5aba039eaac05058a918a7bf631  # v2.2.2
+      with:
+        tag_name: ${{ github.ref_name }}
+        name: Behavedr ${{ github.ref_name }}
+        draft: false
+        prerelease: false
+        make_latest: true
+        generate_release_notes: true
+        body: |
+          ## Behavedr ${{ github.ref_name }}
+
+          ### Verify before install
+          1. Download `SHA256SUMS` and (when published) `SHA256SUMS.sig` + each asset's `.sig`.
+          2. Confirm SHA-256 of the asset matches `SHA256SUMS`.
+          3. Agent auto-update requires RSA-PSS signatures against the baked-in public key.
+
+          See **docs/SUPPLY_CHAIN.md** and **docs/RELEASE.md** for signing, OS trust, and operator verification.
+
+          ### Windows (recommended)
+          | Asset | What to do |
+          |-------|------------|
+          | **`Behavedr-Setup-*-win-x64.exe`** | Run the installer - Program Files, service, uninstall |
+          | `Behavedr-Portable-*-win-x64.zip` | Portable single-file agent |
+
+          ### Other platforms
+          | Asset | Platform |
+          |-------|----------|
+          | `Behavedr-Portable-*-linux-x64.zip` | Linux x64 - extract, `chmod +x Behavedr`, run as root/systemd |
+          | `Behavedr-Portable-*-osx-arm64.zip` | macOS Apple Silicon |
+          | `Behavedr-*-android.apk` | Android arm64 |
+
+          ### Platform status
+          - Windows / Linux / macOS / Android: production userland EDR (see README for scope limits)
+          - iOS is not a Behavedr SKU (Apple sandbox; use MDM for phones)
+          - Default response mode remains **AlertOnly** until operators enable Active response
+        files: release-assets/*

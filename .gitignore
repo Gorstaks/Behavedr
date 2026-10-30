@@ -1,0 +1,30 @@
+bin/
+obj/
+publish/
+dist/
+*.user
+*.suo
+.DS_Store
+.vs/
+TestResults/
+
+# Package lock files ARE committed for supply-chain reproducibility
+# (RestorePackagesWithLockFile + CI --locked-mode)
+
+# Certificates - never commit private keys or PFX files
+certs/
+*.pfx
+*.key
+*.pem
+!*pub.pem
+!keys/android/*.cert.pem
+!keys/android/*.sha256.txt
+!keys/android/README.md
+
+# Android release keystore material (private)
+keys/android/*.p12
+keys/android/*.jks
+keys/android/*.keystore
+keys/android/*.key.pem
+keys/android/*.password.txt
+keys/android/*.der

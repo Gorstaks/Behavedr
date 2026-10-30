@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Behavedr Android Network Security Configuration
+
+    Enforces:
+    1. Certificate pinning for Behavedr server communication
+    2. Cleartext traffic disabled globally (HTTPS-only)
+    3. System CA trust restricted to prevent rogue CA injection
+    4. Debug overrides disabled in release builds
+
+    This prevents MITM attacks even if the attacker installs a rogue CA
+    certificate on the device (common in corporate proxy setups and
+    Android instrumentation attacks).
+
+    Pin format: SHA-256 hash of the SubjectPublicKeyInfo (SPKI) of the
+    server's certificate or its CA. Generate with:
+      openssl x509 -in server.crt -pubkey -noout |
+        openssl pkey -pubin -outform der |
+        openssl dgst -sha256 -binary | base64
+
+    NOTE: Always include a backup pin (different CA or next cert in chain)
+    to avoid bricking the app when certificates rotate.
+-->
+<network-security-config>
+
+    <!-- Global: disable cleartext (HTTP) traffic entirely -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <!-- Only trust system CAs (not user-installed CAs) -->
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- Behavedr server: certificate pinning -->
+    <domain-config>
+        <domain includeSubdomains="true">api.croatiasecurity.com</domain>
+        <domain includeSubdomains="true">behavedr.croatiasecurity.com</domain>
+        <pin-set expiration="2027-01-01">
+            <!-- Primary: server leaf certificate SPKI hash -->
+            <pin digest="SHA-256">BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=</pin>
+            <!-- Backup: intermediate CA SPKI hash (rotation safety) -->
+            <pin digest="SHA-256">CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC=</pin>
+        </pin-set>
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+
+    <!-- GitHub API: pin for update downloads -->
+    <domain-config>
+        <domain includeSubdomains="true">api.github.com</domain>
+        <domain includeSubdomains="true">github.com</domain>
+        <domain includeSubdomains="true">objects.githubusercontent.com</domain>
+        <trust-anchors>
+            <!-- GitHub uses DigiCert - trust system CAs only (no user CAs) -->
+            <certificates src="system" />
+        </trust-anchors>
+    </domain-config>
+
+    <!-- Debug builds: allow user CAs for testing (stripped in release) -->
+    <debug-overrides>
+        <trust-anchors>
+            <certificates src="user" />
+        </trust-anchors>
+    </debug-overrides>
+
+</network-security-config>

@@ -1,0 +1,225 @@
+name: Build Behavedr
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  desktop:
+    name: Desktop (${{ matrix.rid }})
+    # Prevent indefinite hangs (e.g. pathological test/process scans on macos-latest).
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+          - os: ubuntu-latest
+            rid: linux-x64
+          - os: macos-latest
+            rid: osx-arm64
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
+      with:
+        dotnet-version: '10.0.x'
+        dotnet-quality: 'ga'
+
+    - name: Restore (locked)
+      run: |
+        dotnet restore src/Behavedr.Core/Behavedr.Core.csproj --locked-mode
+        dotnet restore src/Behavedr.Agent/Behavedr.Agent.csproj --locked-mode
+        dotnet restore tests/Behavedr.Tests/Behavedr.Tests.csproj --locked-mode
+
+    - name: Vulnerability audit
+      shell: bash
+      run: |
+        set -euo pipefail
+        # Fail the build if any restored package is known-vulnerable at moderate+ severity.
+        # Uses the NuGet vulnerability database via the .NET SDK.
+        # Note: do not match bare "Low" without word boundaries - "following" contains "low".
+        echo "Scanning Agent project for vulnerable packages..."
+        if ! dotnet list src/Behavedr.Agent/Behavedr.Agent.csproj package --vulnerable --include-transitive 2>&1 | tee vuln-agent.txt; then
+          echo "::error::dotnet list package --vulnerable failed for Agent"
+          exit 1
+        fi
+        if grep -Eiq 'has the following vulnerable packages|Severity' vuln-agent.txt; then
+          if grep -Eiq '\b(Critical|High|Moderate|Low)\b' vuln-agent.txt; then
+            echo "::error::Vulnerable NuGet packages detected in Agent dependency graph"
+            cat vuln-agent.txt
+            exit 1
+          fi
+        fi
+        echo "Scanning Tests project for vulnerable packages..."
+        if ! dotnet list tests/Behavedr.Tests/Behavedr.Tests.csproj package --vulnerable --include-transitive 2>&1 | tee vuln-tests.txt; then
+          echo "::error::dotnet list package --vulnerable failed for Tests"
+          exit 1
+        fi
+        if grep -Eiq 'has the following vulnerable packages|Severity' vuln-tests.txt; then
+          if grep -Eiq '\b(Critical|High|Moderate|Low)\b' vuln-tests.txt; then
+            echo "::error::Vulnerable NuGet packages detected in Tests dependency graph"
+            cat vuln-tests.txt
+            exit 1
+          fi
+        fi
+        echo "No known vulnerable packages reported."
+
+    - name: Build Core + Agent
+      run: |
+        dotnet build src/Behavedr.Core/Behavedr.Core.csproj -c Release --no-restore
+        dotnet build src/Behavedr.Agent/Behavedr.Agent.csproj -c Release --no-restore
+
+    - name: Build Tests
+      run: dotnet build tests/Behavedr.Tests/Behavedr.Tests.csproj -c Release --no-restore
+
+    - name: Run tests
+      # Cap wall-clock so a single hung suite cannot burn the full job timeout.
+      timeout-minutes: 10
+      run: dotnet test tests/Behavedr.Tests/Behavedr.Tests.csproj -c Release --no-build --verbosity normal
+
+    - name: Publish Agent
+      run: dotnet publish src/Behavedr.Agent/Behavedr.Agent.csproj -c Release -r ${{ matrix.rid }} --self-contained -o publish/agent
+
+    - name: Generate SBOM
+      if: runner.os == 'Linux'
+      run: |
+        dotnet tool install --global Microsoft.Sbom.DotNetTool 2>/dev/null || true
+        VERSION=$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props | head -1)
+        sbom-tool generate -b publish/agent -bc src/Behavedr.Agent -pn Behavedr -pv "${VERSION}" -ps CroatiaSecurity -nsb https://github.com/CroatiaSecurity/Behavedr || echo "SBOM generation skipped (tool not available)"
+
+  android:
+    name: Android
+    runs-on: ubuntu-latest
+    # PR CI remains best-effort so desktop merges are not blocked by MAUI SDK flake.
+    # Release workflow hard-fails if the APK is missing (see release.yml).
+    continue-on-error: true
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
+      with:
+        dotnet-version: '10.0.x'
+        dotnet-quality: 'ga'
+
+    - name: Setup Java
+      uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00  # v4.7.1
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407  # v3.2.2
+
+    - name: Install Android platform packages
+      run: |
+        sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" 2>/dev/null \
+          || sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+        yes | sdkmanager --licenses || true
+
+    - name: Install MAUI Android workload
+      run: dotnet workload install maui-android
+
+    - name: Restore Mobile (locked when lockfile present)
+      run: |
+        if [ -f src/Behavedr.Mobile/packages.lock.json ]; then
+          dotnet restore src/Behavedr.Mobile/Behavedr.Mobile.csproj --locked-mode -p:MobileTfms=net10.0-android
+        else
+          echo "::warning::Mobile packages.lock.json missing - restore without locked-mode"
+          dotnet restore src/Behavedr.Mobile/Behavedr.Mobile.csproj -p:MobileTfms=net10.0-android
+        fi
+
+    - name: Build Android
+      run: dotnet build src/Behavedr.Mobile/Behavedr.Mobile.csproj -c Release -f net10.0-android -r android-arm64 --no-restore
+
+    - name: Publish Android
+      run: dotnet publish src/Behavedr.Mobile/Behavedr.Mobile.csproj -c Release -f net10.0-android -r android-arm64 -o publish/android --no-restore
+
+    - name: Upload Android artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: behavedr-android
+        path: publish/android
+        if-no-files-found: warn
+
+  auto-tag:
+    name: Auto-tag release
+    needs: [desktop]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+      with:
+        fetch-depth: 0
+
+    - name: Read version from Directory.Build.props
+      id: version
+      shell: bash
+      run: |
+        VERSION=$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props | head -1)
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "tag=v${VERSION}" >> "$GITHUB_OUTPUT"
+        echo "Detected version: ${VERSION}"
+
+    - name: Check if tag already exists
+      id: check
+      shell: bash
+      run: |
+        TAG="${{ steps.version.outputs.tag }}"
+        if git rev-parse "$TAG" >/dev/null 2>&1; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          echo "Tag $TAG already exists - skipping tag creation"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          echo "Tag $TAG does not exist - will create"
+        fi
+
+    - name: Create and push tag
+      if: steps.check.outputs.exists == 'false'
+      shell: bash
+      run: |
+        TAG="${{ steps.version.outputs.tag }}"
+        git config user.name "github-actions[bot]"
+        git config user.email "github-actions[bot]@users.noreply.github.com"
+        git tag -a "$TAG" -m "Release $TAG"
+        git push origin "$TAG"
+        echo "Created and pushed tag: $TAG"
+
+    - name: Check if release exists
+      id: release_check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        TAG="${{ steps.version.outputs.tag }}"
+        if gh release view "$TAG" >/dev/null 2>&1; then
+          echo "exists=true" >> "$GITHUB_OUTPUT"
+          echo "Release $TAG already exists - skipping"
+        else
+          echo "exists=false" >> "$GITHUB_OUTPUT"
+          echo "Release $TAG does not exist - will trigger"
+        fi
+
+    - name: Trigger release workflow
+      if: steps.release_check.outputs.exists == 'false'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        TAG="${{ steps.version.outputs.tag }}"
+        echo "Triggering release workflow for $TAG"
+        gh workflow run release.yml --ref "$TAG"
+        echo "Release workflow dispatched for $TAG"

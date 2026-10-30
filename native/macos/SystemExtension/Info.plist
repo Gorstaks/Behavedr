@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleIdentifier</key>
+	<string>com.croatiasecurity.behavedr.es</string>
+	<key>CFBundleName</key>
+	<string>BehavedrES</string>
+	<key>CFBundleDisplayName</key>
+	<string>Behavedr Endpoint Security</string>
+	<key>CFBundleVersion</key>
+	<string>0.3.3</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.3.3</string>
+	<key>CFBundlePackageType</key>
+	<string>SYSX</string>
+	<key>CFBundleExecutable</key>
+	<string>BehavedrES</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>LSMinimumSystemVersion</key>
+	<string>12.0</string>
+	<key>NSSystemExtensionUsageDescription</key>
+	<string>Behavedr needs an Endpoint Security extension for real-time process monitoring.</string>
+</dict>
+</plist>

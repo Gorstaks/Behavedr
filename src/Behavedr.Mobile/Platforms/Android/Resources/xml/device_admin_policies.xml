@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Behavedr Device Admin policies declaration.
+    These policies are requested when activating device admin.
+
+    For Device Owner provisioning, all policies are implicitly granted.
+    For manual Device Admin activation, the user sees these in the confirmation dialog.
+-->
+<device-admin xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-policies>
+        <!-- Lock the device screen -->
+        <force-lock />
+        <!-- Wipe device data (nuclear response option) -->
+        <wipe-data />
+        <!-- Monitor failed password attempts (brute force detection) -->
+        <watch-login />
+        <!-- Set password requirements (compliance) -->
+        <limit-password />
+        <!-- Reset password (recovery) -->
+        <reset-password />
+        <!-- Disable camera (anti-surveillance response) -->
+        <disable-camera />
+        <!-- Set lock screen features -->
+        <disable-keyguard-features />
+    </uses-policies>
+</device-admin>

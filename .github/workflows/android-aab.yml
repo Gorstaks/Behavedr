@@ -1,0 +1,130 @@
+name: Android AAB (Play)
+
+# Builds a Play-compatible Android App Bundle (.aab) and uploads it as an artifact.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'src/Behavedr.Mobile/**'
+      - 'src/Behavedr.Core/**'
+      - 'Directory.Build.props'
+      - '.github/workflows/android-aab.yml'
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  aab:
+    name: Build AAB
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+    - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+
+    - name: Version
+      id: ver
+      shell: bash
+      run: |
+        VERSION=$(grep -oP '(?<=<Version>)[^<]+' Directory.Build.props | head -1)
+        echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+    - name: Setup .NET
+      uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9  # v4.3.1
+      with:
+        dotnet-version: '10.0.x'
+        dotnet-quality: 'ga'
+
+    - name: Setup Java
+      uses: actions/setup-java@c5195efecf7bdfc987ee8bae7a71cb8b11521c00  # v4.7.1
+      with:
+        distribution: temurin
+        java-version: '17'
+
+    - name: Setup Android SDK
+      uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407  # v3.2.2
+
+    - name: Install Android platform packages
+      run: |
+        sdkmanager "platforms;android-35" "build-tools;35.0.0" "platform-tools" 2>/dev/null \
+          || sdkmanager "platforms;android-34" "build-tools;34.0.0" "platform-tools"
+        yes | sdkmanager --licenses || true
+
+    - name: Install MAUI Android workload
+      run: dotnet workload install maui-android
+
+    - name: Restore Mobile
+      run: |
+        if [ -f src/Behavedr.Mobile/packages.lock.json ]; then
+          dotnet restore src/Behavedr.Mobile/Behavedr.Mobile.csproj --locked-mode -p:MobileTfms=net10.0-android
+        else
+          dotnet restore src/Behavedr.Mobile/Behavedr.Mobile.csproj -p:MobileTfms=net10.0-android
+        fi
+
+    - name: Publish AAB
+      run: >
+        dotnet publish src/Behavedr.Mobile/Behavedr.Mobile.csproj
+        -c Release
+        -f net10.0-android
+        -p:MobileTfms=net10.0-android
+        -p:AndroidPackageFormat=aab
+        -p:AndroidPackageFormats=aab
+        -p:Version=${{ steps.ver.outputs.version }}
+        -p:ApplicationDisplayVersion=${{ steps.ver.outputs.version }}
+        -o publish/android-aab
+
+    - name: Collect AAB
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p dist
+        mapfile -t AABS < <(find publish/android-aab src/Behavedr.Mobile -type f -name '*.aab' 2>/dev/null || true)
+        if [ ${#AABS[@]} -eq 0 ]; then
+          echo "::error::No .aab produced"
+          find publish -type f | head -100 || true
+          exit 1
+        fi
+        for f in "${AABS[@]}"; do
+          echo "Found: $f"
+          cp -v "$f" "dist/"
+        done
+        # Canonical name for Play upload
+        FIRST="${AABS[0]}"
+        cp -v "$FIRST" "dist/Behavedr-${{ steps.ver.outputs.version }}-android.aab"
+        ls -la dist/
+
+    - name: Optional release keystore sign (when secrets present)
+      env:
+        ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+        ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -z "${ANDROID_KEYSTORE_BASE64:-}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD:-}" ]; then
+          echo "::warning::No ANDROID_KEYSTORE_* secrets - AAB keeps MSBuild/debug signing. Fine for first Play upload if you enroll Play App Signing."
+          exit 0
+        fi
+        ALIAS="${ANDROID_KEY_ALIAS:-behavedr}"
+        KEYPASS="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+        KS="${RUNNER_TEMP}/behavedr-release.p12"
+        echo "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "$KS"
+        AAB="dist/Behavedr-${{ steps.ver.outputs.version }}-android.aab"
+        # jarsigner signs AAB; re-sign in place
+        jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+          -keystore "$KS" -storetype pkcs12 \
+          -storepass "$ANDROID_KEYSTORE_PASSWORD" \
+          -keypass "$KEYPASS" \
+          "$AAB" "$ALIAS"
+        jarsigner -verify -verbose -certs "$AAB" || true
+        echo "Signed AAB with release keystore alias=$ALIAS"
+        rm -f "$KS"
+
+    - name: Upload AAB artifact
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+      with:
+        name: behavedr-android-aab
+        path: dist/*.aab
+        if-no-files-found: error
+        retention-days: 30

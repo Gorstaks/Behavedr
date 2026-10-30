@@ -1,0 +1,28 @@
+# Dependabot - NuGet and GitHub Actions
+# Keeps transitive graphs and Actions pins under continuous review.
+# See docs/SUPPLY_CHAIN.md for acceptance criteria on dependency bumps.
+version: 2
+updates:
+  - package-ecosystem: nuget
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - security
+    commit-message:
+      prefix: "deps"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "ci"

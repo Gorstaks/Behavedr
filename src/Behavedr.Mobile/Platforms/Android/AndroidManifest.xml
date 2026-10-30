@@ -1,0 +1,86 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <application android:allowBackup="false" android:supportsRtl="true" android:label="Behavedr"
+               android:networkSecurityConfig="@xml/network_security_config" />
+
+  <!-- ================================================================
+       CORE PERMISSIONS
+       ================================================================ -->
+
+  <!-- Basic connectivity for telemetry/updates -->
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+  <!-- ================================================================
+       MONITORING PERMISSIONS
+       Behavioral EDR permissions - requested at RUNTIME only when the user
+       explicitly enables the corresponding monitoring feature.
+       ================================================================ -->
+
+  <!-- Usage stats: requires Settings.ACTION_USAGE_ACCESS_SETTINGS intent -->
+  <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+                   android:maxSdkVersion="99" />
+
+  <!-- Package enumeration: required for sideload detection on API 30+ -->
+  <uses-permission android:name="android.permission.QUERY_ALL_PACKAGES"
+                   android:maxSdkVersion="99" />
+
+  <!-- ================================================================
+       SERVICE PERSISTENCE PERMISSIONS
+       ================================================================ -->
+
+  <!-- Foreground service for continuous monitoring -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+
+  <!-- Boot receiver: restart service after reboot -->
+  <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+  <!-- Notifications for the foreground service (Android 13+) -->
+  <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+  <!-- WakeLock: prevent CPU sleep during detection cycles (v0.1.8 hardening) -->
+  <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+  <!-- Exact alarms: restart service after user swipe (v0.1.8 hardening) -->
+  <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+  <!-- ================================================================
+       v0.2.0: BATTERY / DOZE BYPASS
+       Required for uninterrupted monitoring on aggressive OEMs.
+       ================================================================ -->
+
+  <!-- Request Doze whitelist (shows one-time system dialog) -->
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+  <!-- ================================================================
+       v0.2.0: VPN-BASED NETWORK INSPECTION
+       Required for non-rooted network monitoring and isolation.
+       ================================================================ -->
+
+  <!-- Bind VPN service (local VPN for traffic inspection) -->
+  <uses-permission android:name="android.permission.BIND_VPN_SERVICE" />
+
+  <!-- ================================================================
+       v0.2.0: DEVICE ADMIN / ENTERPRISE
+       Required for Device Owner / Profile Owner response actions.
+       ================================================================ -->
+
+  <!-- Request device admin (basic level - lock, wipe, password policy) -->
+  <uses-permission android:name="android.permission.BIND_DEVICE_ADMIN" />
+
+  <!-- Install/uninstall packages (Device Owner silent install) -->
+  <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+  <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
+
+  <!-- ================================================================
+       v0.2.0: ADDITIONAL DETECTION PERMISSIONS
+       ================================================================ -->
+
+  <!-- Access fine location for network-based location verification -->
+  <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+
+  <!-- Read phone state for SIM-swap detection -->
+  <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+
+</manifest>
