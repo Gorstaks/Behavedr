@@ -38,7 +38,7 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.Maui.Controls" Version="10.0.0" />
-    <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Debug" Version="10.0.14" />
   </ItemGroup>
 
   <!-- Play Integrity: opt-in NuGet (EnablePlayIntegrityPackage=true). Reflection path works without it. -->
