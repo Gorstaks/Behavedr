@@ -1,10 +1,10 @@
 <Project>
 
   <PropertyGroup>
-    <Version>0.4.4</Version>
-    <AssemblyVersion>0.4.4.0</AssemblyVersion>
-    <FileVersion>0.4.4.0</FileVersion>
-    <InformationalVersion>0.4.4</InformationalVersion>
+    <Version>0.4.5</Version>
+    <AssemblyVersion>0.4.5.0</AssemblyVersion>
+    <FileVersion>0.4.5.0</FileVersion>
+    <InformationalVersion>0.4.5</InformationalVersion>
     <Product>Behavedr</Product>
     <Company>CroatiaSecurity</Company>
     <Authors>CroatiaSecurity</Authors>
