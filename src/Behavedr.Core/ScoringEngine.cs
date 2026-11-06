@@ -29,10 +29,19 @@ public class ScoringEngine
     private readonly BehavioralBaseline _baseline = new();
     private static readonly TimeSpan StateRetention = TimeSpan.FromMinutes(30);
     private DateTime _lastPrune = DateTime.UtcNow;
+    private readonly Func<DateTime> _clock;
 
-    public ScoringEngine(ScoringConfig? config = null)
+    /// <summary>
+    /// Category corroboration only counts categories seen on the same PID within this window.
+    /// Older categories no longer add to the score, so a process cannot accumulate points
+    /// indefinitely.
+    /// </summary>
+    public static readonly TimeSpan CorroborationWindow = TimeSpan.FromMinutes(5);
+
+    public ScoringEngine(ScoringConfig? config = null, Func<DateTime>? clock = null)
     {
         _config = config ?? ScoringConfig.Default;
+        _clock = clock ?? (() => DateTime.UtcNow);
     }
 
     public double PresidentKillThreshold
@@ -111,14 +120,18 @@ public class ScoringEngine
             categories.Add(cat);
         }
 
+        var now = _clock();
         var state = _processStates.GetOrAdd(evt.ProcessId, _ => new ProcessScoreState());
-        state.LastSeen = DateTime.UtcNow;
+        state.LastSeen = now;
+
+        // 4. Category corroboration boost: +15 per distinct other category seen on this PID
+        //    within the corroboration window. Categories from the current evaluation do not count.
+        int priorCategories = state.CategoryLastSeen.Count(kv =>
+            !categories.Contains(kv.Key) && now - kv.Value <= CorroborationWindow);
         foreach (var cat in categories)
-            state.DetectedCategories.Add(cat);
+            state.CategoryLastSeen[cat] = now;
         state.DetectionCount++;
 
-        // 4. Category corroboration boost: +15 per additional distinct category on this PID
-        int priorCategories = state.DetectedCategories.Count - categories.Count;
         if (priorCategories > 0)
         {
             var boost = priorCategories * 15.0;
@@ -254,16 +267,19 @@ public class ScoringEngine
     /// <summary>Get corroborating category count for a process.</summary>
     public int GetCorroboratingCategoryCount(string processId)
     {
-        return _processStates.TryGetValue(processId, out var state)
-            ? state.DetectedCategories.Count
-            : 0;
+        if (!_processStates.TryGetValue(processId, out var state))
+            return 0;
+
+        var now = _clock();
+        return state.CategoryLastSeen.Count(kv => now - kv.Value <= CorroborationWindow);
     }
 }
 
 /// <summary>Per-process scoring state for category tracking and corroboration.</summary>
 internal sealed class ProcessScoreState
 {
-    public HashSet<string> DetectedCategories { get; } = new(StringComparer.OrdinalIgnoreCase);
+    /// <summary>Last time each threat category was observed on this process.</summary>
+    public Dictionary<string, DateTime> CategoryLastSeen { get; } = new(StringComparer.OrdinalIgnoreCase);
     public int DetectionCount { get; set; }
     public DateTime LastSeen { get; set; } = DateTime.UtcNow;
 }

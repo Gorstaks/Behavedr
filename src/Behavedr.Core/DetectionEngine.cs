@@ -2,26 +2,35 @@ namespace Behavedr.Core;
 
 using Behavedr.Core.Models;
 using Behavedr.Core.Platform;
+using Behavedr.Core.Policy;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 
 /// <summary>
 /// Main behavioral detection engine.
-/// Collects signals from registered platform monitors, scores them, and decides on response.
+/// Collects signals from registered platform monitors, scores them per process, and decides on response.
+/// Machine-wide signals (no PID) are collected for context but never scored as a detection.
+/// The agent's own processes are removed before scoring.
 /// </summary>
 public class DetectionEngine
 {
     private readonly ScoringEngine _scoring;
     private readonly BehavioralCorrelationEngine _correlation;
     private readonly SignalDeduplicator _deduplicator;
+    private readonly SuppressionList _suppressions;
     private readonly List<IPlatformMonitor> _monitors = new();
     private readonly ILogger<DetectionEngine> _logger;
 
-    public DetectionEngine(ScoringEngine? scoring = null, BehavioralCorrelationEngine? correlation = null, ILogger<DetectionEngine>? logger = null)
+    public DetectionEngine(
+        ScoringEngine? scoring = null,
+        BehavioralCorrelationEngine? correlation = null,
+        ILogger<DetectionEngine>? logger = null,
+        SuppressionList? suppressions = null)
     {
         _scoring = scoring ?? new ScoringEngine();
         _correlation = correlation ?? new BehavioralCorrelationEngine();
         _deduplicator = new SignalDeduplicator();
+        _suppressions = suppressions ?? SuppressionList.Empty;
         _logger = logger ?? NullLogger<DetectionEngine>.Instance;
     }
 
@@ -35,7 +44,46 @@ public class DetectionEngine
     }
 
     /// <summary>
+    /// Collect and filter one monitoring cycle's signals without scoring them. Use this for
+    /// the periodic scan. Scoring happens per PID through <see cref="ScoreAttributed"/>, so no
+    /// machine-wide total is ever reported as a detection.
+    /// </summary>
+    public async Task<List<Signal>> CollectCycleSignalsAsync(CancellationToken ct = default)
+    {
+        var signals = await CollectSignalsAsync(ct);
+
+        // Deduplicate signals within this cycle
+        signals = _deduplicator.DeduplicateWithinCycle(signals);
+
+        // Drop signals about the agent itself, its children, and processes it launched
+        signals = signals.Where(s => !IsAgentSignal(s)).ToList();
+
+        // Run behavioral correlation to produce composite signals
+        var composites = _correlation.Correlate(signals);
+        if (composites.Count > 0)
+        {
+            signals.AddRange(composites);
+            _logger.LogDebug("Correlation engine produced {Count} composite signals", composites.Count);
+        }
+
+        // Operator-approved suppressions (never President's Law categories)
+        signals = _suppressions.Apply(signals, out int suppressed);
+        if (suppressed > 0)
+            _logger.LogDebug("Suppressed {Count} signal(s) by operator rule", suppressed);
+        LastSuppressedCount = suppressed;
+
+        // Cooldown per PID, so one process cannot suppress another process's signal of the same type
+        return ApplyCooldownPerPid(signals);
+    }
+
+    /// <summary>Signals removed by operator suppressions in the most recent cycle.</summary>
+    public int LastSuppressedCount { get; private set; }
+
+    /// <summary>
     /// Process a detection event: collect signals from all monitors, score, and determine response.
+    /// The cycle's signals are scored as a whole, so this suits callers with a single subject
+    /// process. The periodic agent scan uses <see cref="CollectCycleSignalsAsync"/> and
+    /// <see cref="ScoreAttributed"/>.
     /// </summary>
     public async Task<DetectionResult> ProcessEventAsync(DetectionEvent evt, CancellationToken ct = default)
     {
@@ -44,21 +92,7 @@ public class DetectionEngine
         _logger.LogDebug("Processing event: {ProcessName} ({BehaviorType}) from {Source}",
             evt.ProcessName, evt.BehaviorType, evt.Source);
 
-        var signals = await CollectSignalsAsync(ct);
-
-        // Deduplicate signals within this cycle
-        signals = _deduplicator.DeduplicateWithinCycle(signals);
-
-        // Run behavioral correlation to produce composite signals
-        var composites = _correlation.Correlate(signals);
-        if (composites.Count > 0)
-        {
-            signals.AddRange(composites);
-            _logger.LogInformation("Correlation engine produced {Count} composite signals", composites.Count);
-        }
-
-        // Apply cross-cycle cooldown suppression
-        signals = _deduplicator.ApplyCooldown(signals, evt.ProcessId);
+        var signals = await CollectCycleSignalsAsync(ct);
 
         var score = _scoring.CalculateScore(evt, signals);
         bool presidentKill = _scoring.ShouldPresidentKill(score, evt);
@@ -90,6 +124,20 @@ public class DetectionEngine
         var score = _scoring.CalculateScore(evt, signals);
         var presidentKill = _scoring.ShouldPresidentKill(score, evt);
         return new DetectionResult(evt, score, presidentKill, signals);
+    }
+
+    private static bool IsAgentSignal(Signal signal) =>
+        SignalAttribution.TryGetPid(signal.Type, out var pid) && AgentProcessIdentity.IsAgentOwned(pid);
+
+    private List<Signal> ApplyCooldownPerPid(List<Signal> signals)
+    {
+        var result = new List<Signal>(signals.Count);
+        foreach (var group in signals.GroupBy(s =>
+                     SignalAttribution.TryGetPid(s.Type, out var pid) ? pid.ToString() : null))
+        {
+            result.AddRange(_deduplicator.ApplyCooldown(group.ToList(), group.Key));
+        }
+        return result;
     }
 
     /// <summary>

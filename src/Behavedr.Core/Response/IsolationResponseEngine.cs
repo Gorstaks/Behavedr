@@ -148,7 +148,12 @@ public class IsolationResponseEngine : IResponseAction
                     UseShellExecute = false, CreateNoWindow = true,
                     RedirectStandardOutput = true, RedirectStandardError = true,
                 });
-                if (ps != null) await ps.WaitForExitAsync();
+                if (ps != null)
+                {
+                    // Our own EncodedCommand call must not be scored as attacker tradecraft.
+                    Behavedr.Core.Platform.AgentProcessIdentity.TrackSpawned(ps.Id);
+                    await ps.WaitForExitAsync();
+                }
             }
             else if (OperatingSystem.IsLinux())
             {
@@ -159,7 +164,11 @@ public class IsolationResponseEngine : IResponseAction
                     UseShellExecute = false, CreateNoWindow = true,
                     RedirectStandardOutput = true, RedirectStandardError = true,
                 });
-                if (umount != null) await umount.WaitForExitAsync();
+                if (umount != null)
+                {
+                    Behavedr.Core.Platform.AgentProcessIdentity.TrackSpawned(umount.Id);
+                    await umount.WaitForExitAsync();
+                }
             }
             else if (OperatingSystem.IsMacOS())
             {
@@ -170,7 +179,11 @@ public class IsolationResponseEngine : IResponseAction
                     UseShellExecute = false, CreateNoWindow = true,
                     RedirectStandardOutput = true, RedirectStandardError = true,
                 });
-                if (hdiutil != null) await hdiutil.WaitForExitAsync();
+                if (hdiutil != null)
+                {
+                    Behavedr.Core.Platform.AgentProcessIdentity.TrackSpawned(hdiutil.Id);
+                    await hdiutil.WaitForExitAsync();
+                }
             }
             _logger.LogWarning("[IsolationResponse] Dismounted ISO {Path}", isoPath);
         }

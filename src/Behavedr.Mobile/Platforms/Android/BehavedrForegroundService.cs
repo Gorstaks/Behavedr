@@ -212,7 +212,9 @@ public class BehavedrForegroundService : Service
         var builder = new Notification.Builder(this, ChannelId)
             .SetContentTitle("Behavedr")
             .SetContentText("Monitoring active")
-            .SetSmallIcon(Resource.Mipmap.appicon)
+            // Monochrome alpha-only drawable. Using the color launcher icon here
+            // rendered as a generic white blob (looked like a default icon).
+            .SetSmallIcon(Resource.Drawable.ic_stat_behavedr)
             .SetOngoing(true)
             .SetCategory(Notification.CategoryService)
             .SetVisibility(NotificationVisibility.Secret);

@@ -10,6 +10,16 @@ public static class SignalAttribution
 {
     private static readonly Regex PidRegex = new(@":pid:(\d+)", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
+    /// <summary>Read the attributed PID from a signal type such as <c>rule:name:pid:1234</c>.</summary>
+    public static bool TryGetPid(string signalType, out int pid)
+    {
+        var match = PidRegex.Match(signalType);
+        if (match.Success && int.TryParse(match.Groups[1].Value, out pid))
+            return true;
+        pid = 0;
+        return false;
+    }
+
     public static List<(int Pid, string ProcessName, List<Signal> Signals)> GroupByPid(IEnumerable<Signal> signals)
     {
         var byPid = new Dictionary<int, (string Name, List<Signal> Signals)>();

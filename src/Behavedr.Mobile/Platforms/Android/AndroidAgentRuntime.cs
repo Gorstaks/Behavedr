@@ -31,9 +31,32 @@ public static class AndroidAgentRuntime
     private static string? _injectionToken;
     private static ILogger _logger = NullLogger.Instance;
 
+    // Live status for the UI. Updated after every detection cycle.
+    private static long _cyclesRun;
+    private static int _lastSignalCount;
+    private static double _lastTopScore;
+    private static DateTime _lastCycleUtc = DateTime.MinValue;
+
     public static bool IsInitialized
     {
         get { lock (Gate) return _initialized; }
+    }
+
+    /// <summary>
+    /// Snapshot of agent health for display in the UI. Safe to call any time.
+    /// </summary>
+    public static AgentStatus GetStatus()
+    {
+        lock (Gate)
+        {
+            return new AgentStatus(
+                Initialized: _initialized,
+                MonitorCount: _engine?.RegisteredMonitors.Count ?? 0,
+                CyclesRun: _cyclesRun,
+                LastSignalCount: _lastSignalCount,
+                LastTopScore: _lastTopScore,
+                LastCycleUtc: _lastCycleUtc);
+        }
     }
 
     public static DetectionEngine Engine
@@ -225,36 +248,59 @@ public static class AndroidAgentRuntime
             source: "Android",
             isUserTargeted: false);
 
-        var result = await _engine!.ProcessEventAsync(evt, ct);
-        var responses = await _responseEngine!.RespondAsync(result, ct);
+        // Collect signals only. Each attributed PID is scored and answered on its own, so the
+        // cycle total is never treated as a detection (same fix as the desktop agent).
+        var signals = await _engine!.CollectCycleSignalsAsync(ct);
 
-        // Attribute by PID and re-score that PID only (never copy the machine-wide cycle score).
-        if (result.Signals.Count > 0)
+        DetectionResult? strongest = null;
+        int responseCount = 0;
+        foreach (var (pid, processName, pidSignals) in SignalAttribution.GroupByPid(signals))
         {
-            foreach (var (pid, processName, signals) in SignalAttribution.GroupByPid(result.Signals))
-            {
-                if (ct.IsCancellationRequested) break;
+            if (ct.IsCancellationRequested) break;
 
-                var targetedEvt = DetectionEvent.Create(
-                    processId: pid.ToString(),
-                    processName: processName,
-                    behaviorType: "behavioral_detection",
-                    source: "signal_attribution",
-                    isUserTargeted: false);
+            var targetedEvt = DetectionEvent.Create(
+                processId: pid.ToString(),
+                processName: processName,
+                behaviorType: "behavioral_detection",
+                source: "signal_attribution",
+                isUserTargeted: false);
 
-                var targetedResult = _engine.ScoreAttributed(targetedEvt, signals);
-                await _responseEngine.RespondAsync(targetedResult, ct);
-            }
+            var targetedResult = _engine.ScoreAttributed(targetedEvt, pidSignals);
+            responseCount += (await _responseEngine!.RespondAsync(targetedResult, ct)).Count;
+
+            if (strongest is null || targetedResult.Score > strongest.Score)
+                strongest = targetedResult;
         }
 
-        if (result.Signals.Count > 0)
+        var result = strongest ?? new DetectionResult(evt, 0, false, signals);
+
+        lock (Gate)
+        {
+            _cyclesRun++;
+            _lastSignalCount = signals.Count;
+            _lastTopScore = result.Score;
+            _lastCycleUtc = DateTime.UtcNow;
+        }
+
+        if (signals.Count > 0)
         {
             _logger.LogInformation(
-                "[AndroidAgentRuntime] Cycle: {Signals} signals, score={Score:F1}, kill={Kill}, responses={Resp}",
-                result.Signals.Count, result.Score, result.PresidentKill, responses.Count);
+                "[AndroidAgentRuntime] Cycle: {Signals} signals, top process score={Score:F1}, kill={Kill}, responses={Resp}",
+                signals.Count, result.Score, result.PresidentKill, responseCount);
         }
 
         return result;
     }
 }
+
+/// <summary>
+/// Immutable snapshot of the agent's runtime health for UI display.
+/// </summary>
+public readonly record struct AgentStatus(
+    bool Initialized,
+    int MonitorCount,
+    long CyclesRun,
+    int LastSignalCount,
+    double LastTopScore,
+    DateTime LastCycleUtc);
 #endif

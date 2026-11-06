@@ -12,9 +12,9 @@
 
     <ApplicationTitle>Behavedr</ApplicationTitle>
     <ApplicationId>com.croatiasecurity.behavedr</ApplicationId>
-    <ApplicationDisplayVersion>0.4.4</ApplicationDisplayVersion>
+    <ApplicationDisplayVersion>0.4.5</ApplicationDisplayVersion>
     <!-- Android versionCode (integer). Must increase for every Play upload. -->
-    <ApplicationVersion>44</ApplicationVersion>
+    <ApplicationVersion>45</ApplicationVersion>
 
     <!-- Publisher APK cert pin (not end users). Optional for release.
          Hex SHA256 of release signing cert, no colons. Comma-separate for Play upload key.
@@ -50,6 +50,8 @@
   <ItemGroup Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">
     <AndroidResource Include="Platforms\Android\Resources\xml\network_security_config.xml" />
     <AndroidResource Include="Platforms\Android\Resources\xml\device_admin_policies.xml" />
+    <!-- Monochrome notification small icon (alpha-only silhouette) -->
+    <AndroidResource Include="Platforms\Android\Resources\drawable\ic_stat_behavedr.xml" />
   </ItemGroup>
 
   <ItemGroup>

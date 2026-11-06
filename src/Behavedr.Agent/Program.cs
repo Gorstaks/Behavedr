@@ -2,6 +2,7 @@ using Behavedr.Agent;
 using Behavedr.Core;
 using Behavedr.Core.Communication;
 using Behavedr.Core.Platform;
+using Behavedr.Core.Policy;
 using Behavedr.Core.Response;
 using Behavedr.Core.Security;
 using Behavedr.Core.Update;
@@ -73,6 +74,21 @@ try
     builder.Services.AddSingleton(scoringConfig);
     builder.Services.AddSingleton<ScoringEngine>();
     builder.Services.AddSingleton<BehavioralCorrelationEngine>();
+
+    // Publisher signatures lower heuristic confidence, and suppressions require a signed binary.
+    // Both need the Windows Authenticode check, so without it they stay inactive (fail closed).
+    Func<string, bool>? isSigned = null;
+    if (OperatingSystem.IsWindows())
+    {
+        var signerTrust = new SignerTrustService();
+        isSigned = signerTrust.IsSignedFile;
+        ThreatHeuristics.IsPublisherSigned = isSigned;
+    }
+    var suppressions = SuppressionList.Load(
+        Path.Combine(AppContext.BaseDirectory, "suppressions.json"), isSigned);
+    Log.Information("Suppression list loaded: {Count} rule(s)", suppressions.Count);
+    builder.Services.AddSingleton(suppressions);
+
     builder.Services.AddSingleton<DetectionEngine>();
     builder.Services.AddSingleton<LivePolicyState>();
     builder.Services.AddSingleton<PolicyApplicator>();

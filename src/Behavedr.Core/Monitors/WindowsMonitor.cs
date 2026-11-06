@@ -1,23 +1,27 @@
 namespace Behavedr.Core.Monitors;
 
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.Versioning;
 using Behavedr.Core.Models;
 using Behavedr.Core.Platform;
 
 /// <summary>
-/// Windows behavioral monitor using real-time process telemetry.
-/// Uses WMI Win32_Process events and Process class for live data.
-/// ETW (TraceEvent) can be layered on in a future version for kernel-level hooks.
+/// Windows process-level heuristics. One process enumeration per cycle covers image
+/// heuristics, thread and memory outliers, PowerShell lifetime, and new-process bursts.
+/// Command-line analysis lives in <see cref="BehavioralMonitor"/>.
+/// Signals carry a PID whenever one exists, so they can be scored per process.
 /// </summary>
 public class WindowsMonitor : IPlatformMonitor
 {
     public string PlatformName => "Windows";
     public bool IsSupported => OperatingSystem.IsWindows();
 
-    // Suspicious parent-child relationships moved to BehavioralMonitor (v0.0.7)
-    // WindowsMonitor now focuses on process-level heuristics; behavioral analysis
-    // is handled by the dedicated BehavioralMonitor with command-line scanning.
+    private static readonly TimeSpan NewProcessWindow = TimeSpan.FromSeconds(10);
+    private static readonly TimeSpan ShortLivedPowerShell = TimeSpan.FromSeconds(3);
+
+    // Image path by PID. The entry is reused only while the process start time is unchanged.
+    private readonly ConcurrentDictionary<int, (DateTime Start, string? Path)> _imageCache = new();
 
     [SupportedOSPlatform("windows")]
     public Task<IEnumerable<Signal>> GetSignalsAsync(CancellationToken ct = default)
@@ -27,40 +31,58 @@ public class WindowsMonitor : IPlatformMonitor
         try
         {
             var processes = Process.GetProcesses();
+            var livePids = new HashSet<int>();
+            int recentCount = 0;
+            var now = DateTime.Now;
 
             foreach (var proc in processes)
             {
-                if (ct.IsCancellationRequested) break;
-
                 try
                 {
-                    if (proc.Id == Environment.ProcessId) continue;
-                    var name = proc.ProcessName;
-                    string? path = null;
-                    try { path = proc.MainModule?.FileName; } catch { /* access denied */ }
-                    if (Response.ResponseSafety.IsOwnAgentImage(path)) continue;
+                    if (ct.IsCancellationRequested) break;
 
-                    // Rename-resistant scoring (name alone is low weight; Temp+exe high)
+                    livePids.Add(proc.Id);
+                    DateTime? start = TryGetStartTime(proc);
+                    if (start is { } started && now - started < NewProcessWindow)
+                        recentCount++;
+
+                    if (AgentProcessIdentity.IsAgentOwned(proc.Id)) continue;
+
+                    var name = proc.ProcessName;
+                    var path = GetImagePath(proc, start);
+                    var pidTag = $"pid:{proc.Id}";
+
+                    // Rename-resistant scoring (name alone is low weight; staging path + exe is high)
                     var off = ThreatHeuristics.Evaluate(name, path);
                     if (off is { } o)
                     {
                         signals.Add(new Signal(
-                            $"suspicious_process:{o.Tag}:{o.Detail}:pid:{proc.Id}",
+                            $"suspicious_process:{o.Tag}:{o.Detail}:{pidTag}",
                             o.Weight, o.Confidence));
                     }
 
-                    // Detect processes with unusually high thread counts (possible injection)
                     var nameLower = name.ToLowerInvariant();
-                    if (proc.Threads.Count > 200)
+
+                    // Thread count outliers can indicate injection. Enumerating threads is costly,
+                    // so this check reads only the count.
+                    int threads = proc.Threads.Count;
+                    if (threads > 200)
                     {
-                        signals.Add(new Signal($"high_thread_count:{nameLower}({proc.Threads.Count})", 25, 0.4));
+                        signals.Add(new Signal($"high_thread_count:{nameLower}({threads}):{pidTag}", 25, 0.4));
                     }
 
-                    // Detect processes consuming excessive memory relative to their type
+                    // Memory outliers, excluding known heavy applications
                     var memMb = proc.WorkingSet64 / (1024 * 1024);
                     if (memMb > 2048 && !IsKnownHighMemProcess(nameLower))
                     {
-                        signals.Add(new Signal($"high_memory:{nameLower}({memMb}MB)", 20, 0.3));
+                        signals.Add(new Signal($"high_memory:{nameLower}({memMb}MB):{pidTag}", 20, 0.3));
+                    }
+
+                    // Short-lived PowerShell may be a download cradle. Weak on its own, so it
+                    // only matters when the same PID has other signals.
+                    if (nameLower is "powershell" or "pwsh" && start is { } ps && now - ps < ShortLivedPowerShell)
+                    {
+                        signals.Add(new Signal($"short_lived_powershell:{pidTag}", 25, 0.5));
                     }
                 }
                 catch (Exception)
@@ -73,11 +95,16 @@ public class WindowsMonitor : IPlatformMonitor
                 }
             }
 
-            // Check for PowerShell with suspicious flags in command line (if accessible)
-            DetectSuspiciousPowerShell(signals);
+            // Burst of new processes on the whole machine. Carries no PID, so it is never
+            // attributed to a process. It is machine context only.
+            if (recentCount > 20)
+            {
+                signals.Add(new Signal($"process_burst:{recentCount}_in_10s", 50, 0.7));
+            }
 
-            // Check for recently started processes (last interval)
-            DetectNewProcesses(signals);
+            // Forget cached images for processes that no longer exist
+            foreach (var pid in _imageCache.Keys.Where(pid => !livePids.Contains(pid)).ToList())
+                _imageCache.TryRemove(pid, out _);
         }
         catch (Exception)
         {
@@ -87,70 +114,24 @@ public class WindowsMonitor : IPlatformMonitor
         return Task.FromResult<IEnumerable<Signal>>(signals);
     }
 
-    [SupportedOSPlatform("windows")]
-    private static void DetectSuspiciousPowerShell(List<Signal> signals)
+    private string? GetImagePath(Process proc, DateTime? start)
     {
-        try
-        {
-            var psProcesses = Process.GetProcessesByName("powershell")
-                .Concat(Process.GetProcessesByName("pwsh"));
+        if (start is not { } started)
+            return null;
 
-            foreach (var ps in psProcesses)
-            {
-                try
-                {
-                    // PowerShell running with -EncodedCommand, -Bypass, -Hidden, -NoProfile
-                    // We can't always read command line without elevation, but we can detect
-                    // the process existing in certain suspicious contexts
-                    var startTime = ps.StartTime;
-                    var runTime = DateTime.Now - startTime;
+        if (_imageCache.TryGetValue(proc.Id, out var cached) && cached.Start == started)
+            return cached.Path;
 
-                    // Very short-lived PowerShell (< 3 seconds) is suspicious - may be download cradle
-                    if (runTime.TotalSeconds < 3)
-                    {
-                        signals.Add(new Signal("short_lived_powershell", 40, 0.6));
-                    }
-                }
-                catch { }
-                finally
-                {
-                    ps.Dispose();
-                }
-            }
-        }
-        catch { }
+        string? path = null;
+        try { path = proc.MainModule?.FileName; } catch { /* access denied */ }
+        _imageCache[proc.Id] = (started, path);
+        return path;
     }
 
-    [SupportedOSPlatform("windows")]
-    private static void DetectNewProcesses(List<Signal> signals)
+    private static DateTime? TryGetStartTime(Process proc)
     {
-        try
-        {
-            var recentThreshold = DateTime.Now.AddSeconds(-10);
-            var processes = Process.GetProcesses();
-
-            int recentCount = 0;
-            foreach (var proc in processes)
-            {
-                try
-                {
-                    if (proc.StartTime > recentThreshold)
-                        recentCount++;
-                }
-                catch { }
-                finally
-                {
-                    proc.Dispose();
-                }
-            }
-
-            // Burst of new processes in a short window (possible fork bomb or spray)
-            if (recentCount > 20)
-            {
-                signals.Add(new Signal($"process_burst:{recentCount}_in_10s", 50, 0.7));
-            }
-        }
-        catch { }
+        try { return proc.StartTime; }
+        catch { return null; }
     }
 
     private static bool IsKnownHighMemProcess(string name) =>

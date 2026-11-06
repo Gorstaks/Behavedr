@@ -9,15 +9,17 @@ using Environment = System.Environment;
 namespace Behavedr.Mobile;
 
 /// <summary>
-/// Launcher activity - zero visuals. Initializes Android platform security
-/// components, starts the foreground monitoring service, and moves to background.
+/// Launcher activity. Initializes Android platform security components, starts the
+/// foreground monitoring service, and hosts the visible status screen (AgentPage).
 ///
+/// v0.4.5: no longer self-hides. It previously used Theme.NoDisplay and called
+/// MoveTaskToBack on launch, which gave the app no UI and made it look like spyware.
 /// v0.2.2: All detection/response lives in <see cref="AndroidAgentRuntime"/> +
 /// <see cref="BehavedrForegroundService"/>. Activity no longer creates orphan
 /// signal providers that never reached the engine.
 /// </summary>
 [Activity(
-    Theme = "@android:style/Theme.NoDisplay",
+    Theme = "@style/Maui.SplashTheme",
     MainLauncher = true,
     Exported = true,
     LaunchMode = LaunchMode.SingleTask,
@@ -98,7 +100,10 @@ public class MainActivity : MauiAppCompatActivity
             // OEM may block the intent
         }
 
-        MoveTaskToBack(true);
+        // v0.4.5: do NOT MoveTaskToBack here. The activity now hosts a visible
+        // status screen (AgentPage). Hiding the UI on launch is what made the app
+        // behave like spyware and show nothing when tapped. The foreground service
+        // keeps monitoring regardless of whether this screen is open.
     }
 
     private static void WriteForensicLog(string message)

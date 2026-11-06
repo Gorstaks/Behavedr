@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.4.5] - 2026-11-06
+
+### Android: give the app a face (no longer looks/behaves like spyware)
+
+The Android build shipped as an invisible agent: the launcher activity used
+`Theme.NoDisplay` and called `MoveTaskToBack` on start, `AgentPage` set
+`Content = null`, and the notification reused the color launcher icon (which
+Android renders as a white blob). Combined with device-admin / package-install /
+VPN permissions, tapping the icon did nothing and Play Protect flagged it. All
+three user-visible symptoms (default-looking icon, install warning, no UI) traced
+to this design.
+
+- **Visible status screen:** `AgentPage` now shows protection state, monitor
+  count, last-scan time, and a plain explanation that monitoring runs in the
+  background. It polls `AndroidAgentRuntime.GetStatus()` every 2s.
+- **Activity no longer hides itself:** removed `Theme.NoDisplay` and the
+  launch-time `MoveTaskToBack`. The foreground service still owns monitoring, so
+  closing the screen does not stop protection.
+- **Proper notification icon:** added monochrome alpha-only drawable
+  `ic_stat_behavedr`; `BehavedrForegroundService` uses it instead of the color
+  launcher icon.
+- **Distinct launcher icon:** shield mark replaces the Android-green dot that
+  read as a stock icon.
+- **Runtime status API:** `AndroidAgentRuntime.GetStatus()` / `AgentStatus`
+  snapshot for the UI.
+
+Note: the sensitive permission set (device admin, package install/delete, VPN)
+still triggers installer/Play Protect review. That is inherent to an EDR agent;
+the visible UI and honest notification are what distinguish it from malware.
+
 ## [0.4.4] - 2026-08-24
 
 ### Release CI: Windows test flake

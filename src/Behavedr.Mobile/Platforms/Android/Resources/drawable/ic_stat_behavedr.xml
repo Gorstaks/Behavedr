@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Notification small icon. Android renders ONLY the alpha channel of this drawable
+  (all opaque pixels become white, transparent stays transparent). A full-color
+  icon here shows as a generic white blob, which is why the old SetSmallIcon on the
+  color launcher icon looked like a default placeholder. This is a proper monochrome
+  silhouette: a shield outline with a center dot.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="24"
+    android:viewportHeight="24">
+    <!-- Shield body -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,2L4,5v6c0,4.4 3.1,8.6 8,10 4.9,-1.4 8,-5.6 8,-10V5L12,2zM12,4.1l6,2.3V11c0,3.4 -2.3,6.6 -6,7.9C8.3,17.6 6,14.4 6,11V6.4L12,4.1z" />
+    <!-- Center dot -->
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M12,8m-2,0a2,2 0,1 1,4 0a2,2 0,1 1,-4 0" />
+</vector>

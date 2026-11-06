@@ -85,11 +85,21 @@ public sealed class BehavedrMetrics
         _platformFeatureSoftFail = _meter.CreateCounter<long>(
             "behavedr.platform.soft_fail",
             description: "Optional platform depth features that soft-failed (eBPF/ES/Landlock)");
+
+        _signalsByFamily = _meter.CreateCounter<long>(
+            "behavedr.signals.by_family",
+            description: "Signals collected per rule family, for tuning false positives");
+
+        _signalsSuppressed = _meter.CreateCounter<long>(
+            "behavedr.signals.suppressed",
+            description: "Signals dropped by operator suppressions");
     }
 
     private readonly Counter<long> _isolationActions;
     private readonly Counter<long> _signatureFailures;
     private readonly Counter<long> _platformFeatureSoftFail;
+    private readonly Counter<long> _signalsByFamily;
+    private readonly Counter<long> _signalsSuppressed;
 
     public void RecordCycleCompleted() => _detectionCycles.Add(1);
 
@@ -126,4 +136,14 @@ public sealed class BehavedrMetrics
 
     public void RecordPlatformSoftFail(string feature) =>
         _platformFeatureSoftFail.Add(1, new KeyValuePair<string, object?>("feature", feature));
+
+    /// <summary>Count one signal by its rule family (the part of the signal type before the first colon).</summary>
+    public void RecordSignalFamily(string family) =>
+        _signalsByFamily.Add(1, new KeyValuePair<string, object?>("family", family));
+
+    public void RecordSignalsSuppressed(int count)
+    {
+        if (count > 0)
+            _signalsSuppressed.Add(count);
+    }
 }

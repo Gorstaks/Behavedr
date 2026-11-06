@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Launcher icon foreground. Distinct shield mark so the app does not read as a
+  stock Android icon. Kept within the safe center zone for adaptive-icon masking.
+-->
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128">
-  <circle cx="64" cy="64" r="36" fill="none" stroke="#3DDC84" stroke-width="8"/>
-  <circle cx="64" cy="64" r="12" fill="#3DDC84"/>
+  <g transform="translate(64 62) scale(3.1) translate(-12 -12)" fill="none">
+    <path d="M12 2 L4 5 v6 c0 4.4 3.1 8.6 8 10 4.9 -1.4 8 -5.6 8 -10 V5 L12 2 Z"
+          fill="#E6EEFA" stroke="#3DDC84" stroke-width="1.1"/>
+    <circle cx="12" cy="9.5" r="2" fill="#3DDC84"/>
+  </g>
 </svg>

@@ -193,6 +193,7 @@ public sealed partial class WindowsNetworkIsolation : IResponseAction, IDisposab
                 },
             };
             proc.Start();
+            Behavedr.Core.Platform.AgentProcessIdentity.TrackSpawned(proc.Id);
             await proc.WaitForExitAsync(ct);
             return proc.ExitCode == 0;
         }
